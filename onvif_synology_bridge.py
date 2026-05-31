@@ -9,7 +9,6 @@ the legacy ``SYNO.SurveillanceStation.ExternalEvent`` API.
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
 import logging
 import os
 import signal
@@ -45,8 +44,6 @@ class Config:
     synology_password: str | None
     synology_external_event_id: int
     synology_timeout_seconds: float
-    pullpoint_xaddr: str | None
-    reconnect_seconds: float
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -81,8 +78,6 @@ class Config:
             synology_password=password,
             synology_external_event_id=int(os.getenv("SYNOLOGY_EXTERNAL_EVENT_ID", "1")),
             synology_timeout_seconds=float(os.getenv("SYNOLOGY_TIMEOUT_SECONDS", "10")),
-            pullpoint_xaddr=os.getenv("PULLPOINT_XADDR") or None,
-            reconnect_seconds=float(os.getenv("RECONNECT_SECONDS", "15")),
         )
 
 
@@ -132,98 +127,21 @@ def connect_pullpoint(config: Config) -> Any:
         config.camera_user,
         config.camera_password,
     )
-    subscription_xaddr = config.pullpoint_xaddr or current_pullpoint_xaddr(camera)
-    if not subscription_xaddr:
-        events = camera.create_events_service()
-        LOGGER.info("Creating ONVIF PullPoint subscription for %s", config.camera_host)
-        subscription_response = events.CreatePullPointSubscription()
-        subscription_xaddr = subscription_address(subscription_response)
-
-    if not subscription_xaddr:
-        raise RuntimeError(
-            "The camera created a PullPoint subscription, but no subscription "
-            "address was found in the response. Set PULLPOINT_XADDR manually "
-            "to the camera's subscription URL shown by another ONVIF tool."
-        )
-
-    LOGGER.info("Using ONVIF PullPoint subscription endpoint: %s", subscription_xaddr)
-    set_pullpoint_xaddr(camera, subscription_xaddr)
-    return camera.create_pullpoint_service()
+    events = camera.create_events_service()
+    LOGGER.info("Creating ONVIF PullPoint subscription for %s", config.camera_host)
+    return events.CreatePullPointSubscription()
 
 
-def current_pullpoint_xaddr(camera: Any) -> str | None:
-    xaddrs = getattr(camera, "xaddrs", {})
-    for namespace in pullpoint_namespaces():
-        if xaddrs.get(namespace):
-            return str(xaddrs[namespace])
-    return None
-
-
-def subscription_address(subscription_response: Any) -> str | None:
-    raw = object_to_plain(subscription_response)
-    candidates = (
-        ("SubscriptionReference", "Address", "_value_1"),
-        ("SubscriptionReference", "Address"),
-        ("SubscriptionReference", "ReferenceParameters", "Address"),
-        ("Address", "_value_1"),
-        ("Address",),
-    )
-    for path in candidates:
-        value = extract_first(raw, path)
-        if value:
-            return str(value)
-    return find_url_value(raw)
-
-
-def find_url_value(value: Any) -> str | None:
-    if isinstance(value, dict):
-        for item in value.values():
-            found = find_url_value(item)
-            if found:
-                return found
-    elif isinstance(value, list):
-        for item in value:
-            found = find_url_value(item)
-            if found:
-                return found
-    elif isinstance(value, str) and value.startswith(("http://", "https://")):
-        return value
-    return None
-
-
-def pullpoint_namespaces() -> tuple[str, str]:
-    return (
-        "http://www.onvif.org/ver10/events/wsdl/PullPointSubscription",
-        "http://www.onvif.org/ver10/events/wsdl/PullPointSubscriptionBinding",
-    )
-
-
-def set_pullpoint_xaddr(camera: Any, subscription_xaddr: str) -> None:
-    for namespace in pullpoint_namespaces():
-        camera.xaddrs[namespace] = subscription_xaddr
-
-    pullpoint_service = getattr(camera, "pullpoint", None)
-    ws_client = getattr(pullpoint_service, "ws_client", None)
-    if ws_client:
-        ws_client.set_options(location=subscription_xaddr)
-
-
-def pull_messages(pullpoint: Any, config: Config) -> list[Any]:
-    response = pullpoint.PullMessages(
+def pull_messages(subscription: Any, config: Config) -> list[Any]:
+    response = subscription.PullMessages(
         {"Timeout": config.poll_timeout, "MessageLimit": config.message_limit}
     )
-    messages = field_value(response, "NotificationMessage")
+    messages = getattr(response, "NotificationMessage", None)
     if not messages:
         return []
     if isinstance(messages, list):
         return messages
     return [messages]
-
-
-def field_value(value: Any, name: str) -> Any:
-    if isinstance(value, Mapping):
-        return value.get(name)
-    return getattr(value, name, None)
 
 
 def parse_event(message: Any, config: Config) -> CameraEvent | None:
@@ -239,10 +157,7 @@ def parse_event(message: Any, config: Config) -> CameraEvent | None:
 
 
 def object_to_plain(value: Any) -> Any:
-    zeep_values = get_zeep_values(value)
-    if zeep_values is not None:
-        return object_to_plain(zeep_values)
-    if isinstance(value, Mapping):
+    if isinstance(value, dict):
         return {str(key): object_to_plain(val) for key, val in value.items()}
     if isinstance(value, (list, tuple)):
         return [object_to_plain(item) for item in value]
@@ -250,16 +165,9 @@ def object_to_plain(value: Any) -> Any:
         return {
             key: object_to_plain(val)
             for key, val in vars(value).items()
-            if not key.startswith("__") or key == "__values__"
+            if not key.startswith("__")
         }
     return value
-
-
-def get_zeep_values(value: Any) -> Any:
-    try:
-        return object.__getattribute__(value, "__values__")
-    except AttributeError:
-        return None
 
 
 def extract_first(value: Any, path: Iterable[str]) -> Any:
@@ -382,37 +290,27 @@ def check_response(response: Response) -> None:
 
 def run(config: Config) -> None:
     last_sent_at: dict[str, float] = {}
+    subscription = connect_pullpoint(config)
 
     while not STOP:
-        try:
-            pullpoint = connect_pullpoint(config)
-            while not STOP:
-                for message in pull_messages(pullpoint, config):
-                    event = parse_event(message, config)
-                    if not event:
-                        LOGGER.debug("Ignoring unmatched ONVIF event: %s", message)
-                        continue
-                    if not event.active:
-                        LOGGER.info("Ignoring inactive event: %s", event.name)
-                        continue
+        for message in pull_messages(subscription, config):
+            event = parse_event(message, config)
+            if not event:
+                LOGGER.debug("Ignoring unmatched ONVIF event: %s", message)
+                continue
+            if not event.active:
+                LOGGER.info("Ignoring inactive event: %s", event.name)
+                continue
 
-                    now = time.monotonic()
-                    previous = last_sent_at.get(event.name, 0)
-                    if now - previous < config.cooldown_seconds:
-                        LOGGER.info("Suppressing %s during cooldown", event.name)
-                        continue
+            now = time.monotonic()
+            previous = last_sent_at.get(event.name, 0)
+            if now - previous < config.cooldown_seconds:
+                LOGGER.info("Suppressing %s during cooldown", event.name)
+                continue
 
-                    LOGGER.info("Forwarding active ONVIF event to Synology: %s", event.name)
-                    send_to_synology(event, config)
-                    last_sent_at[event.name] = now
-        except Exception:
-            if STOP:
-                raise
-            LOGGER.exception(
-                "ONVIF polling failed; reconnecting in %.1f seconds",
-                config.reconnect_seconds,
-            )
-            time.sleep(config.reconnect_seconds)
+            LOGGER.info("Forwarding active ONVIF event to Synology: %s", event.name)
+            send_to_synology(event, config)
+            last_sent_at[event.name] = now
 
 
 def main() -> int:

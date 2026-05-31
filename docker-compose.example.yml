@@ -17,7 +17,4 @@ services:
       # SYNOLOGY_EXTERNAL_EVENT_ID: "1"
       EVENT_NAME_PATTERNS: "MyFieldDetector,MyLineDetector,MyMotionDetectorRule"
       COOLDOWN_SECONDS: "20"
-      RECONNECT_SECONDS: "15"
-      # Only set this if logs say the camera did not return a PullPoint address.
-      # PULLPOINT_XADDR: "http://192.168.1.50/onvif/subscription/0"
       VERIFY_TLS: "true"
