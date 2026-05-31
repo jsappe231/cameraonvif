@@ -1,0 +1,26 @@
+services:
+  camera-smtp-synology-bridge:
+    build: .
+    container_name: camera-smtp-synology-bridge
+    restart: unless-stopped
+    ports:
+      # Point the camera's SMTP server at this host and port.
+      - "8025:8025"
+    environment:
+      SMTP_HOST: "0.0.0.0"
+      SMTP_PORT: "8025"
+
+      # Prefer this if Surveillance Station Action Rule exposes Event source: Webhook.
+      SYNOLOGY_WEBHOOK_URL: "https://nas.example.local:5001/webapi/entry.cgi?..."
+      SYNOLOGY_WEBHOOK_METHOD: "POST"
+      # Or use the legacy ExternalEvent API instead of SYNOLOGY_WEBHOOK_URL.
+      # SYNOLOGY_BASE_URL: "https://nas.example.local:5001"
+      # SYNOLOGY_USER: "surveillance-user"
+      # SYNOLOGY_PASSWORD: "change-me"
+      # SYNOLOGY_EXTERNAL_EVENT_ID: "1"
+
+      MATCH_SUBJECT_PATTERNS: "intrusion,line crossing,human,vehicle,person,alarm"
+      MATCH_BODY_PATTERNS: ""
+      IGNORE_SUBJECT_PATTERNS: "test email"
+      COOLDOWN_SECONDS: "20"
+      VERIFY_TLS: "true"
