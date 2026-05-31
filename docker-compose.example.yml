@@ -1,0 +1,23 @@
+services:
+  onvif-synology-bridge:
+    build: .
+    container_name: onvif-synology-bridge
+    restart: unless-stopped
+    environment:
+      CAMERA_HOST: "192.168.1.50"
+      CAMERA_PORT: "80"
+      CAMERA_USER: "admin"
+      CAMERA_PASSWORD: "change-me"
+      # Prefer this if Surveillance Station Action Rule exposes Event source: Webhook.
+      SYNOLOGY_WEBHOOK_URL: "https://nas.example.local:5001/webapi/entry.cgi?..."
+      # Or use the legacy ExternalEvent API instead of SYNOLOGY_WEBHOOK_URL.
+      # SYNOLOGY_BASE_URL: "https://nas.example.local:5001"
+      # SYNOLOGY_USER: "surveillance-user"
+      # SYNOLOGY_PASSWORD: "change-me"
+      # SYNOLOGY_EXTERNAL_EVENT_ID: "1"
+      EVENT_NAME_PATTERNS: "MyFieldDetector,MyLineDetector,MyMotionDetectorRule"
+      COOLDOWN_SECONDS: "20"
+      RECONNECT_SECONDS: "15"
+      # Only set this if logs say the camera did not return a PullPoint address.
+      # PULLPOINT_XADDR: "http://192.168.1.50/onvif/subscription/0"
+      VERIFY_TLS: "true"
