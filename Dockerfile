@@ -7,5 +7,5 @@ WORKDIR /app
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY onvif_synology_bridge.py ./
-CMD ["python", "onvif_synology_bridge.py"]
+COPY camera_smtp_synology_bridge.py ./
+CMD ["python", "camera_smtp_synology_bridge.py"]
