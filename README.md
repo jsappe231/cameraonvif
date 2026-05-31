@@ -74,6 +74,8 @@ docker compose up -d --build
 | `SYNOLOGY_USER` | ExternalEvent mode | Synology account allowed to trigger Surveillance Station external events. |
 | `SYNOLOGY_PASSWORD` | ExternalEvent mode | Password for `SYNOLOGY_USER`. |
 | `SYNOLOGY_EXTERNAL_EVENT_ID` | no | External event ID for ExternalEvent mode. Defaults to `1`. |
+| `PULLPOINT_XADDR` | no | Manual ONVIF PullPoint subscription URL override. Only set this if the camera returns a subscription response without an address or another ONVIF tool shows a required `/onvif/subscription/...` URL. |
+| `RECONNECT_SECONDS` | no | Delay before reconnecting after a camera/network polling error. Defaults to `15`. |
 
 Set either `SYNOLOGY_WEBHOOK_URL` or the three ExternalEvent variables
 `SYNOLOGY_BASE_URL`, `SYNOLOGY_USER`, and `SYNOLOGY_PASSWORD`.
@@ -94,3 +96,9 @@ ONVIF event stream directly.
    an Action Rule from **External device** instead.
 4. If HTTPS fails with a local self-signed certificate, either install a trusted
    certificate on the NAS or set `VERIFY_TLS=false` on a trusted LAN.
+5. If the log says `CreatePullPointSubscriptionResponse instance has no attribute 'PullMessages'`, update to the current bridge code. The subscription response
+   is not itself the object to poll; the bridge now extracts the returned
+   subscription endpoint and creates a PullPoint client bound to that endpoint.
+6. If your camera creates a subscription but omits the subscription address, set
+   `PULLPOINT_XADDR` to the subscription URL shown by another ONVIF client, such
+   as `/onvif/subscription/0` or `/onvif/PullSubManager`.
