@@ -7,5 +7,5 @@ WORKDIR /app
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY camera_smtp_synology_bridge.py ./
-CMD ["python", "camera_smtp_synology_bridge.py"]
+COPY camera_smtp_unifi_protect_bridge.py ./
+CMD ["python", "camera_smtp_unifi_protect_bridge.py"]

@@ -1,10 +1,9 @@
-"""Receive camera alert emails locally and forward matching events to Synology.
+"""Receive camera alert emails and forward matching events to UniFi Protect.
 
 This bridge is intended for cameras whose smart analytics events do not appear
 in ONVIF/ODM, but can trigger the camera's built-in "Send Email" linkage.
 It runs a small SMTP listener, accepts those camera emails, matches their
-subject/body, and triggers Synology Surveillance Station via webhook or the
-legacy ExternalEvent API.
+subject/body, and posts a normalized alarm to a UniFi Protect integration URL.
 """
 
 from __future__ import annotations
@@ -19,13 +18,12 @@ import time
 from dataclasses import dataclass
 from email.message import Message
 from typing import Any
-from urllib.parse import urljoin
 
 import requests
 from aiosmtpd.controller import Controller
 from requests import Response
 
-LOGGER = logging.getLogger("camera-smtp-synology-bridge")
+LOGGER = logging.getLogger("camera-smtp-unifi-protect-bridge")
 STOP_EVENT: asyncio.Event | None = None
 
 
@@ -37,29 +35,15 @@ class Config:
     match_body_patterns: tuple[str, ...]
     ignore_subject_patterns: tuple[str, ...]
     cooldown_seconds: float
-    synology_webhook_url: str | None
-    synology_webhook_method: str
-    synology_base_url: str | None
-    synology_user: str | None
-    synology_password: str | None
-    synology_external_event_id: int
-    synology_timeout_seconds: float
+    unifi_protect_event_url: str
+    unifi_protect_api_key: str | None
+    unifi_protect_camera_id: str | None
+    unifi_protect_timeout_seconds: float
     verify_tls: bool
     max_body_chars: int
 
     @classmethod
     def from_env(cls) -> "Config":
-        webhook_url = os.getenv("SYNOLOGY_WEBHOOK_URL") or None
-        base_url = os.getenv("SYNOLOGY_BASE_URL") or None
-        user = os.getenv("SYNOLOGY_USER") or None
-        password = os.getenv("SYNOLOGY_PASSWORD") or None
-
-        if not webhook_url and not (base_url and user and password):
-            raise ValueError(
-                "Set SYNOLOGY_WEBHOOK_URL, or set SYNOLOGY_BASE_URL, "
-                "SYNOLOGY_USER, and SYNOLOGY_PASSWORD for ExternalEvent mode."
-            )
-
         return cls(
             smtp_host=os.getenv("SMTP_HOST", "0.0.0.0"),
             smtp_port=int(os.getenv("SMTP_PORT", "8025")),
@@ -70,13 +54,12 @@ class Config:
             match_body_patterns=csv_env("MATCH_BODY_PATTERNS", ""),
             ignore_subject_patterns=csv_env("IGNORE_SUBJECT_PATTERNS", "test email"),
             cooldown_seconds=float(os.getenv("COOLDOWN_SECONDS", "20")),
-            synology_webhook_url=webhook_url,
-            synology_webhook_method=os.getenv("SYNOLOGY_WEBHOOK_METHOD", "POST").upper(),
-            synology_base_url=base_url,
-            synology_user=user,
-            synology_password=password,
-            synology_external_event_id=int(os.getenv("SYNOLOGY_EXTERNAL_EVENT_ID", "1")),
-            synology_timeout_seconds=float(os.getenv("SYNOLOGY_TIMEOUT_SECONDS", "10")),
+            unifi_protect_event_url=required_env("UNIFI_PROTECT_EVENT_URL"),
+            unifi_protect_api_key=os.getenv("UNIFI_PROTECT_API_KEY") or None,
+            unifi_protect_camera_id=os.getenv("UNIFI_PROTECT_CAMERA_ID") or None,
+            unifi_protect_timeout_seconds=float(
+                os.getenv("UNIFI_PROTECT_TIMEOUT_SECONDS", "10")
+            ),
             verify_tls=bool_env("VERIFY_TLS", True),
             max_body_chars=int(os.getenv("MAX_BODY_CHARS", "2000")),
         )
@@ -105,6 +88,13 @@ def bool_env(name: str, default: bool) -> bool:
     if raw is None:
         return default
     return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def required_env(name: str) -> str:
+    value = os.getenv(name)
+    if not value:
+        raise ValueError(f"Missing required environment variable: {name}")
+    return value
 
 
 def configure_logging() -> None:
@@ -141,9 +131,9 @@ class CameraEmailHandler:
             LOGGER.info("Suppressing %r during cooldown", camera_email.event_name)
             return "250 Message accepted"
 
-        send_to_synology(camera_email, self.config)
+        send_to_unifi_protect(camera_email, self.config)
         self.last_sent_at[camera_email.event_name.lower()] = time.monotonic()
-        LOGGER.info("Forwarded camera email alert to Synology: %s", camera_email.event_name)
+        LOGGER.info("Forwarded camera email alert to UniFi Protect: %s", camera_email.event_name)
         return "250 Message accepted"
 
     def in_cooldown(self, camera_email: CameraEmail) -> bool:
@@ -230,61 +220,27 @@ def should_forward(camera_email: CameraEmail, config: Config) -> bool:
     return subject_match or body_match
 
 
-def send_to_synology(camera_email: CameraEmail, config: Config) -> None:
-    if config.synology_webhook_url:
-        send_webhook(camera_email, config)
-    else:
-        trigger_external_event(camera_email, config)
-
-
-def send_webhook(camera_email: CameraEmail, config: Config) -> None:
-    assert config.synology_webhook_url
+def send_to_unifi_protect(camera_email: CameraEmail, config: Config) -> None:
     payload = {
+        "type": "camera-email-alarm",
         "name": camera_email.event_name,
         "source": camera_email.mail_from,
         "description": f"Camera email alert: {camera_email.event_name}",
+        "cameraId": config.unifi_protect_camera_id,
         "subject": camera_email.subject,
         "body": camera_email.body,
-        "message_id": camera_email.message_id,
+        "messageId": camera_email.message_id,
         "recipients": list(camera_email.rcpt_tos),
-        "attachment_count": camera_email.attachment_count,
+        "attachmentCount": camera_email.attachment_count,
     }
-
-    if config.synology_webhook_method == "GET":
-        response = requests.get(
-            config.synology_webhook_url,
-            params=payload,
-            timeout=config.synology_timeout_seconds,
-            verify=config.verify_tls,
-        )
-    else:
-        response = requests.post(
-            config.synology_webhook_url,
-            json=payload,
-            timeout=config.synology_timeout_seconds,
-            verify=config.verify_tls,
-        )
-    check_response(response)
-
-
-def trigger_external_event(camera_email: CameraEmail, config: Config) -> None:
-    assert config.synology_base_url
-    assert config.synology_user
-    assert config.synology_password
-
-    url = urljoin(config.synology_base_url.rstrip("/") + "/", "webapi/entry.cgi")
-    response = requests.get(
-        url,
-        params={
-            "api": "SYNO.SurveillanceStation.ExternalEvent",
-            "method": "Trigger",
-            "version": 1,
-            "eventId": config.synology_external_event_id,
-            "eventName": camera_email.event_name,
-            "account": config.synology_user,
-            "password": config.synology_password,
-        },
-        timeout=config.synology_timeout_seconds,
+    headers = {"Accept": "application/json"}
+    if config.unifi_protect_api_key:
+        headers["X-API-Key"] = config.unifi_protect_api_key
+    response = requests.post(
+        config.unifi_protect_event_url,
+        json=payload,
+        headers=headers,
+        timeout=config.unifi_protect_timeout_seconds,
         verify=config.verify_tls,
     )
     check_response(response)
@@ -295,7 +251,7 @@ def check_response(response: Response) -> None:
     if response.headers.get("content-type", "").startswith("application/json"):
         body = response.json()
         if body.get("success") is False:
-            raise RuntimeError(f"Synology API returned failure: {body}")
+            raise RuntimeError(f"UniFi Protect integration returned failure: {body}")
 
 
 async def run(config: Config) -> None:
