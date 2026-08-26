@@ -1,7 +1,7 @@
 services:
-  camera-smtp-synology-bridge:
+  camera-smtp-unifi-protect-bridge:
     build: .
-    container_name: camera-smtp-synology-bridge
+    container_name: camera-smtp-unifi-protect-bridge
     restart: unless-stopped
     ports:
       # Point the camera's SMTP server at this host and port.
@@ -9,15 +9,15 @@ services:
     environment:
       SMTP_HOST: "0.0.0.0"
       SMTP_PORT: "8025"
+      # Set both values when the camera is configured to use SMTP AUTH LOGIN/PLAIN.
+      SMTP_USERNAME: "camera"
+      SMTP_PASSWORD: "replace-with-camera-smtp-password"
 
-      # Prefer this if Surveillance Station Action Rule exposes Event source: Webhook.
-      SYNOLOGY_WEBHOOK_URL: "https://nas.example.local:5001/webapi/entry.cgi?..."
-      SYNOLOGY_WEBHOOK_METHOD: "POST"
-      # Or use the legacy ExternalEvent API instead of SYNOLOGY_WEBHOOK_URL.
-      # SYNOLOGY_BASE_URL: "https://nas.example.local:5001"
-      # SYNOLOGY_USER: "surveillance-user"
-      # SYNOLOGY_PASSWORD: "change-me"
-      # SYNOLOGY_EXTERNAL_EVENT_ID: "1"
+      # An inbound URL supplied by your Protect version or Protect automation.
+      UNIFI_PROTECT_EVENT_URL: "https://unifi-console.example.local/protect-event"
+      UNIFI_PROTECT_API_KEY: "replace-with-protect-api-key"
+      # Optional Protect camera identifier included in every event.
+      UNIFI_PROTECT_CAMERA_ID: ""
 
       MATCH_SUBJECT_PATTERNS: "intrusion,line crossing,human,vehicle,person,alarm"
       MATCH_BODY_PATTERNS: ""
