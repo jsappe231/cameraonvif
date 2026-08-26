@@ -15,7 +15,7 @@ fake_requests.get = lambda *args, **kwargs: None
 fake_requests.post = lambda *args, **kwargs: None
 sys.modules.setdefault("requests", fake_requests)
 
-bridge = importlib.import_module("camera_smtp_synology_bridge")
+bridge = importlib.import_module("camera_smtp_unifi_protect_bridge")
 
 
 class CameraSmtpBridgeTest(unittest.TestCase):
@@ -27,13 +27,10 @@ class CameraSmtpBridgeTest(unittest.TestCase):
             match_body_patterns=("line crossing",),
             ignore_subject_patterns=("test email",),
             cooldown_seconds=20,
-            synology_webhook_url="https://nas.local/webhook",
-            synology_webhook_method="POST",
-            synology_base_url=None,
-            synology_user=None,
-            synology_password=None,
-            synology_external_event_id=1,
-            synology_timeout_seconds=10,
+            unifi_protect_event_url="https://console.local/protect-event",
+            unifi_protect_api_key="secret",
+            unifi_protect_camera_id="camera-id",
+            unifi_protect_timeout_seconds=10,
             verify_tls=True,
             max_body_chars=2000,
         )
@@ -41,7 +38,7 @@ class CameraSmtpBridgeTest(unittest.TestCase):
     def test_parse_plain_email(self):
         raw = (
             b"From: camera@example.local\r\n"
-            b"To: synology@example.local\r\n"
+            b"To: protect@example.local\r\n"
             b"Subject: Intrusion Detection Alarm\r\n"
             b"Message-ID: <abc@example.local>\r\n"
             b"\r\n"
@@ -51,7 +48,7 @@ class CameraSmtpBridgeTest(unittest.TestCase):
         parsed = bridge.parse_camera_email(
             raw,
             "camera@example.local",
-            ("synology@example.local",),
+            ("protect@example.local",),
             2000,
         )
 
@@ -63,7 +60,7 @@ class CameraSmtpBridgeTest(unittest.TestCase):
     def test_matching_subject_forwards(self):
         camera_email = bridge.CameraEmail(
             mail_from="camera@example.local",
-            rcpt_tos=("synology@example.local",),
+            rcpt_tos=("protect@example.local",),
             subject="Human Detection Alarm",
             body="",
             message_id="",
@@ -75,7 +72,7 @@ class CameraSmtpBridgeTest(unittest.TestCase):
     def test_ignore_test_email(self):
         camera_email = bridge.CameraEmail(
             mail_from="camera@example.local",
-            rcpt_tos=("synology@example.local",),
+            rcpt_tos=("protect@example.local",),
             subject="Test Email - Human Detection",
             body="",
             message_id="",
@@ -87,7 +84,7 @@ class CameraSmtpBridgeTest(unittest.TestCase):
     def test_matching_body_forwards(self):
         camera_email = bridge.CameraEmail(
             mail_from="camera@example.local",
-            rcpt_tos=("synology@example.local",),
+            rcpt_tos=("protect@example.local",),
             subject="Camera Alarm",
             body="Line crossing detected on channel 1",
             message_id="",
@@ -95,6 +92,40 @@ class CameraSmtpBridgeTest(unittest.TestCase):
         )
 
         self.assertTrue(bridge.should_forward(camera_email, self.config()))
+
+    def test_posts_normalized_event_with_api_key(self):
+        camera_email = bridge.CameraEmail(
+            mail_from="camera@example.local",
+            rcpt_tos=("protect@example.local",),
+            subject="Human Detection Alarm",
+            body="Person detected",
+            message_id="<event@camera.local>",
+            attachment_count=1,
+        )
+        calls = []
+        original_post = bridge.requests.post
+        bridge.requests.post = lambda *args, **kwargs: calls.append((args, kwargs)) or FakeResponse()
+        try:
+            bridge.send_to_unifi_protect(camera_email, self.config())
+        finally:
+            bridge.requests.post = original_post
+
+        args, kwargs = calls[0]
+        self.assertEqual(args[0], "https://console.local/protect-event")
+        self.assertEqual(kwargs["headers"]["X-API-Key"], "secret")
+        self.assertEqual(kwargs["json"]["type"], "camera-email-alarm")
+        self.assertEqual(kwargs["json"]["cameraId"], "camera-id")
+        self.assertEqual(kwargs["json"]["attachmentCount"], 1)
+
+
+class FakeResponse:
+    headers = {"content-type": "application/json"}
+
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return {"success": True}
 
 
 if __name__ == "__main__":
