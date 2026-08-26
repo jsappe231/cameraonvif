@@ -1,138 +1,146 @@
-# Camera SMTP to Synology Surveillance Station bridge
+# Camera SMTP to synthetic ONVIF motion bridge
 
-This repository now assumes the camera **does not publish smart analytics events
-through ONVIF**. That matches the current finding from ONVIF Device Manager: ODM
-only sees basic motion, while the camera's smart events still fire internally and
-can use built-in linkage actions such as **Send Email**.
+This service presents a third-party camera to UniFi Protect through a bridge
+ONVIF endpoint. Device identity and service addresses belong to the bridge,
+Media requests are authenticated and proxied to the real camera, and RTSP URIs
+remain pointed at the real camera. Smart-detection email becomes a standard
+ONVIF CellMotionDetector/Motion property change.
 
-The bridge therefore uses the camera's email linkage instead of ONVIF:
+> The bridge converts proprietary camera smart detections received by SMTP into
+> standard ONVIF motion events. UniFi Protect sees these as ordinary third-party
+> ONVIF motion events, not native UniFi AI/person detections.
 
-```text
-Camera smart event, e.g. intrusion / human / vehicle
-        ↓
-Camera built-in Send Email action
-        ↓
-Local fake SMTP listener in this container
-        ↓
-Synology Surveillance Station webhook or ExternalEvent API
-        ↓
-notification, bookmark, recording, or trigger motion event action
-```
+~~~text
+                         +-- bridge Device service
+Protect -- ONVIF ------>+-- proxied real-camera Media service
+                         +-- synthetic PullPoint Events service
+Protect -- RTSP -----------------------------> real camera
+Camera  -- SMTP -------> bridge -- motion true/false --> Protect PullPoint
+~~~
 
-This avoids HeroSpeed/V247/OEM ONVIF limitations entirely. If the camera can send
-an email for a smart event, this bridge can turn that email into a Synology event.
+No video is decoded, relayed, or re-encoded.
 
-## Synology setup
+## Implemented ONVIF subset
 
-If **Camera** is not a usable event source in your Action Rule screen, create an
-Action Rule whose **event source** is one of these Synology-side sources:
+* Device: GetCapabilities, GetServices, GetDeviceInformation,
+  GetSystemDateAndTime, GetScopes, and GetHostname.
+* Media: transparent SOAP proxy for profiles, stream URI, and configuration
+  calls. HTTP ONVIF XAddrs are rewritten to the bridge; RTSP values remain real.
+* Events: GetEventProperties, CreatePullPointSubscription, long-polling
+  PullMessages, Renew, and Unsubscribe.
+* WS-Security UsernameToken plaintext and PasswordDigest authentication with
+  nonce, Created time, constant-time comparison, and clock tolerance.
+* Unknown actions return a SOAP fault without stopping the process.
 
-- **Webhook** → **External event detected via URL** on newer Surveillance Station
-  versions.
-- **External device** → **External event detected** on older Surveillance Station
-  versions.
+The emitted and advertised topic is
+tns1:RuleEngine/CellMotionDetector/Motion. Notifications carry an ONVIF
+tt:Message property change with Data/SimpleItem Name=IsMotion set first to true
+and later false. A retrigger resets the clear timer.
 
-Then set the **action device** to the camera and choose an action such as:
+## Prerequisites and limitations
 
-- **Start action rule recording**
-- **Trigger motion event**
-- **Add bookmark**
-- **Take snapshots**
-- **Send Notification**
+* The real camera needs working ONVIF Media and RTSP services.
+* Protect must be added manually by bridge IP in this milestone. WS-Discovery
+  UDP 3702 is not implemented yet.
+* The default upstream Media URL is
+  http://CAMERA_ONVIF_HOST:CAMERA_ONVIF_PORT/onvif/media_service. Override
+  CAMERA_MEDIA_URL for cameras with a nonstandard XAddr.
+* Protect commonly applies adopted ONVIF credentials to RTSP. For the simplest
+  playable setup, use bridge credentials that also work for camera RTSP.
+  Upstream SOAP always uses CAMERA_USERNAME and CAMERA_PASSWORD.
+* This creates ordinary motion markers, not Protect AI metadata.
+* Protect firmware sequences vary. DEBUG logging and standards SOAP faults make
+  it possible to add narrowly scoped missing actions.
 
-## Camera setup
+## Docker setup
 
-In the camera web UI:
-
-1. Open the smart event you care about, such as intrusion, line crossing, human,
-   or vehicle detection.
-2. Enable the event and enable the **Send Email** linkage method.
-3. Configure SMTP/email settings similar to:
-
-| Camera SMTP field | Value |
-| --- | --- |
-| SMTP server | IP address of the Docker host / Proxmox VM / NAS running this bridge |
-| SMTP port | `8025` by default |
-| TLS/SSL | Off / disabled |
-| Authentication | Off / disabled, if the camera allows it |
-| Sender | Any address, for example `camera@example.local` |
-| Recipient | Any address, for example `synology@example.local` |
-
-If your camera requires port 25, map host port 25 to container port 8025 in
-`docker-compose.yml` with `"25:8025"`. On Linux, binding to port 25 may require
-root privileges or firewall/NAT port forwarding.
-
-## Run with Docker Compose
-
-Copy the example compose file and edit the environment values:
-
-```bash
+~~~bash
 cp docker-compose.example.yml docker-compose.yml
-```
-
-Then start it:
-
-```bash
+# Edit every address and password.
 docker compose up -d --build
-```
-
-Watch logs while triggering a smart event:
-
-```bash
 docker compose logs -f
-```
+~~~
+
+| Port | Purpose |
+| --- | --- |
+| TCP 8080 | ONVIF Device, Media, Events, health |
+| TCP 8025 | Camera SMTP receiver |
+| UDP 3702 | Not exposed; discovery is not implemented |
+| RTSP | Not exposed; Protect connects to the camera |
+
+Secrets are environment variables only. Do not commit the edited Compose file.
 
 ## Configuration
 
 | Variable | Required | Description |
 | --- | --- | --- |
-| `SMTP_HOST` | no | SMTP bind address. Defaults to `0.0.0.0`. |
-| `SMTP_PORT` | no | SMTP listen port inside the container. Defaults to `8025`. |
-| `MATCH_SUBJECT_PATTERNS` | no | Comma-separated, case-insensitive subject substrings that should trigger Synology. Defaults to `intrusion,line crossing,human,vehicle,person,alarm`. |
-| `MATCH_BODY_PATTERNS` | no | Optional comma-separated body substrings that should trigger Synology. Defaults to empty. |
-| `IGNORE_SUBJECT_PATTERNS` | no | Comma-separated subject substrings to ignore. Defaults to `test email`. |
-| `COOLDOWN_SECONDS` | no | Per-event-name suppression window. Defaults to `20`. |
-| `MAX_BODY_CHARS` | no | Maximum email body characters included in the Synology payload. Defaults to `2000`. |
-| `VERIFY_TLS` | no | Verify Synology HTTPS certificates. Defaults to `true`; set `false` only for self-signed local certificates you trust. |
-| `SYNOLOGY_WEBHOOK_URL` | webhook mode | Full webhook URL copied from the Synology Action Rule event page. |
-| `SYNOLOGY_WEBHOOK_METHOD` | no | `POST` or `GET` for webhook mode. Defaults to `POST`. |
-| `SYNOLOGY_BASE_URL` | ExternalEvent mode | DSM base URL, for example `https://nas.local:5001`. |
-| `SYNOLOGY_USER` | ExternalEvent mode | Synology account allowed to trigger Surveillance Station external events. |
-| `SYNOLOGY_PASSWORD` | ExternalEvent mode | Password for `SYNOLOGY_USER`. |
-| `SYNOLOGY_EXTERNAL_EVENT_ID` | no | External event ID for ExternalEvent mode. Defaults to `1`. |
+| ONVIF_ADVERTISED_HOST | yes | LAN IP or hostname Protect uses; never 0.0.0.0. |
+| ONVIF_USERNAME / ONVIF_PASSWORD | yes | Credentials entered in Protect. |
+| ONVIF_BIND_HOST / ONVIF_PORT | no | HTTP bind; default 0.0.0.0:8080. |
+| ONVIF_DEVICE_UUID | no | Stable bridge identity; do not change after adoption. |
+| ONVIF_AUTH_CLOCK_TOLERANCE_SECONDS | no | UsernameToken tolerance; default 300. |
+| CAMERA_ONVIF_HOST | yes | Real camera address. |
+| CAMERA_ONVIF_PORT | no | Real camera ONVIF port; default 80. |
+| CAMERA_USERNAME / CAMERA_PASSWORD | yes | Upstream SOAP credentials. |
+| CAMERA_MEDIA_URL | no | Full upstream Media service URL override. |
+| VERIFY_UPSTREAM_TLS | no | Upstream certificate verification; default true. |
+| SMTP_HOST / SMTP_PORT | no | SMTP bind; default 0.0.0.0:8025. |
+| SMTP_USERNAME / SMTP_PASSWORD | no | Optional LOGIN/PLAIN pair. |
+| MATCH_SUBJECT_PATTERNS | no | Default human,person,intrusion,line crossing,vehicle,alarm. |
+| MATCH_BODY_PATTERNS | no | Optional body substrings. |
+| IGNORE_SUBJECT_PATTERNS | no | Default test email,smtp test. |
+| MOTION_EVENT_DURATION_SECONDS | no | Active duration; default 5, retriggers reset it. |
+| MOTION_COOLDOWN_SECONDS | no | Reserved for future de-duplication; active retriggers extend. |
+| ONVIF_SUBSCRIPTION_TTL_SECONDS | no | Subscription lifetime; default 3600. |
+| ENABLE_DEBUG_ENDPOINTS | no | Enables POST /debug/motion; default false. |
+| LOG_LEVEL | no | Use DEBUG for sanitized SOAP logging. |
 
-Set either `SYNOLOGY_WEBHOOK_URL` or the three ExternalEvent variables
-`SYNOLOGY_BASE_URL`, `SYNOLOGY_USER`, and `SYNOLOGY_PASSWORD`.
+## Camera SMTP setup
 
-## Recommended first test
+Enable Send Email on each desired smart rule:
 
-Before connecting this directly to Synology, you can run `smtp4dev` to discover
-exactly what the camera sends:
+| Setting | Value |
+| --- | --- |
+| Server | Docker host address |
+| Port | 8025 |
+| TLS | Off |
+| Authentication | Off, or configured SMTP credentials |
+| Sender / recipient | Any valid-looking local addresses |
 
-```yaml
-services:
-  smtp4dev:
-    image: rnwood/smtp4dev
-    ports:
-      - "8025:25"
-      - "5000:80"
-```
+LOGIN and PLAIN, including legacy HELO followed by AUTH, are supported. Plain
+SMTP credentials are unencrypted, so isolate the camera LAN.
 
-Point the camera at SMTP port `8025`, trigger the smart event, and inspect the
-subject/body at `http://docker-host:5000`. Copy the useful words into
-`MATCH_SUBJECT_PATTERNS` or `MATCH_BODY_PATTERNS`.
+## Protect adoption
+
+1. Confirm curl http://BRIDGE:8080/health returns status ok.
+2. Add a third-party ONVIF camera manually using the bridge address, port 8080,
+   and ONVIF_USERNAME / ONVIF_PASSWORD.
+3. Protect should query bridge Device, proxy Media through the bridge, receive a
+   real-camera RTSP URI, and create a PullPoint subscription.
+4. Trigger a human rule and look for Synthetic motion ACTIVE, Delivered
+   motion=true, and later Delivered motion=false.
+
+## Diagnostics
+
+GET /health returns status, SMTP state, subscription count, and motion state.
+For an end-to-end test, temporarily enable ENABLE_DEBUG_ENDPOINTS and run:
+
+~~~bash
+curl -X POST http://BRIDGE:8080/debug/motion
+~~~
+
+Disable it afterward. It uses the same motion path as SMTP.
+
+LOG_LEVEL=DEBUG logs SOAP actions and sanitized XML. The WS-Security node is
+replaced by [redacted], so authentication material is not logged.
 
 ## Troubleshooting
 
-1. If the camera has a **Test Email** button, use it first and watch
-   `docker compose logs -f`.
-2. If the camera says SMTP failed, confirm firewall rules and that the camera can
-   reach the Docker host on the mapped port.
-3. If test emails appear but smart events do not, confirm **Send Email** is
-   enabled on the smart event's linkage/action page, not only on the global email
-   settings page.
-4. If Synology is not triggered, temporarily set `MATCH_SUBJECT_PATTERNS` to a
-   very broad value from the logged subject, or set `MATCH_BODY_PATTERNS` based
-   on the smtp4dev-discovered email body.
-5. If your Synology webhook requires GET instead of POST, set
-   `SYNOLOGY_WEBHOOK_METHOD=GET`.
+* Protect cannot connect: use bridge IP and port 8080 and ensure
+  ONVIF_ADVERTISED_HOST is reachable from the console.
+* GetProfiles fails: inspect the camera Media XAddr and set CAMERA_MEDIA_URL.
+* Video authentication fails: use bridge credentials accepted by camera RTSP.
+* SMTP stops at AUTH LOGIN: match SMTP credentials on camera and bridge.
+* No event: verify a subscription exists and the subject is not ignored.
+* Unknown action: enable DEBUG, capture its name and sanitized request, and add
+  the missing narrow handler.

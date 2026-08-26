@@ -1,26 +1,29 @@
 services:
-  camera-smtp-synology-bridge:
+  camera-onvif-bridge:
     build: .
-    container_name: camera-smtp-synology-bridge
+    container_name: camera-onvif-bridge
     restart: unless-stopped
     ports:
-      # Point the camera's SMTP server at this host and port.
+      - "8080:8080"
       - "8025:8025"
     environment:
+      ONVIF_BIND_HOST: "0.0.0.0"
+      ONVIF_PORT: "8080"
+      ONVIF_ADVERTISED_HOST: "192.168.88.10"
+      ONVIF_USERNAME: "admin"
+      ONVIF_PASSWORD: "change-me"
+      CAMERA_ONVIF_HOST: "192.168.88.123"
+      CAMERA_ONVIF_PORT: "80"
+      CAMERA_USERNAME: "admin"
+      CAMERA_PASSWORD: "change-me"
+      # CAMERA_MEDIA_URL: "http://192.168.88.123/onvif/media_service"
       SMTP_HOST: "0.0.0.0"
       SMTP_PORT: "8025"
-
-      # Prefer this if Surveillance Station Action Rule exposes Event source: Webhook.
-      SYNOLOGY_WEBHOOK_URL: "https://nas.example.local:5001/webapi/entry.cgi?..."
-      SYNOLOGY_WEBHOOK_METHOD: "POST"
-      # Or use the legacy ExternalEvent API instead of SYNOLOGY_WEBHOOK_URL.
-      # SYNOLOGY_BASE_URL: "https://nas.example.local:5001"
-      # SYNOLOGY_USER: "surveillance-user"
-      # SYNOLOGY_PASSWORD: "change-me"
-      # SYNOLOGY_EXTERNAL_EVENT_ID: "1"
-
-      MATCH_SUBJECT_PATTERNS: "intrusion,line crossing,human,vehicle,person,alarm"
-      MATCH_BODY_PATTERNS: ""
-      IGNORE_SUBJECT_PATTERNS: "test email"
-      COOLDOWN_SECONDS: "20"
-      VERIFY_TLS: "true"
+      SMTP_USERNAME: "camera"
+      SMTP_PASSWORD: "change-me"
+      MATCH_SUBJECT_PATTERNS: "human,person,intrusion,line crossing,vehicle,alarm"
+      IGNORE_SUBJECT_PATTERNS: "test email,smtp test"
+      MOTION_EVENT_DURATION_SECONDS: "5"
+      MOTION_COOLDOWN_SECONDS: "10"
+      LOG_LEVEL: "INFO"
+      ENABLE_DEBUG_ENDPOINTS: "false"
