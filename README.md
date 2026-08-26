@@ -93,12 +93,14 @@ docker compose logs -f
 | `MAX_BODY_CHARS` | no | Maximum body length in the JSON; defaults to `2000`. |
 | `VERIFY_TLS` | no | Verify destination TLS; defaults to `true`. Only disable for a trusted self-signed local endpoint. |
 | `LOG_LEVEL` | no | Python log level; defaults to `INFO`. |
+| `SMTP_LOG_LEVEL` | no | Internal SMTP protocol log level; defaults to `ERROR`. Use `INFO` for protocol troubleshooting. |
 
 ## Troubleshooting
 
 1. Watch `docker compose logs -f` while using the camera's Test Email button.
 2. If the log ends at `AUTH LOGIN`, set both `SMTP_USERNAME` and `SMTP_PASSWORD`
    to the same credentials configured in the camera, then recreate the container.
+   The bridge accepts AUTH after either `HELO` or `EHLO` for older camera firmware.
 3. Test emails are ignored by default. Confirm the log says they were received.
 4. Trigger a real event and verify its subject matches a configured pattern.
 5. A non-2xx destination response is logged and returned to the camera as an

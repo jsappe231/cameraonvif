@@ -16,13 +16,14 @@ import os
 import signal
 import sys
 import time
+import warnings
 from dataclasses import dataclass
 from email.message import Message
 from typing import Any
 
 import requests
 from aiosmtpd.controller import Controller
-from aiosmtpd.smtp import AuthResult, LoginPassword
+from aiosmtpd.smtp import AuthResult, LoginPassword, SMTP
 from requests import Response
 
 LOGGER = logging.getLogger("camera-smtp-unifi-protect-bridge")
@@ -113,6 +114,7 @@ def configure_logging() -> None:
         level=os.getenv("LOG_LEVEL", "INFO").upper(),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    logging.getLogger("mail.log").setLevel(os.getenv("SMTP_LOG_LEVEL", "ERROR").upper())
 
 
 class SmtpAuthenticator:
@@ -141,6 +143,35 @@ class SmtpAuthenticator:
             handled=success,
             auth_data=auth_data if success else None,
         )
+
+
+class CameraSmtpServer(SMTP):
+    """Support legacy cameras that issue AUTH after HELO instead of EHLO."""
+
+    async def smtp_AUTH(self, arg: str) -> None:
+        assert self.session is not None
+        used_legacy_helo = bool(self.session.host_name and not self.session.extended_smtp)
+        if used_legacy_helo:
+            LOGGER.info("Accepting legacy AUTH after HELO from %s", self.session.peer)
+            self.session.extended_smtp = True
+        try:
+            await super().smtp_AUTH(arg)
+        finally:
+            if used_legacy_helo:
+                self.session.extended_smtp = False
+
+
+class CameraSmtpController(Controller):
+    def factory(self) -> CameraSmtpServer:
+        # aiosmtpd warns for every connection when plaintext AUTH is enabled.
+        # The limitation is documented and logged once by this application.
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message="Requiring AUTH while not requiring TLS.*",
+                category=UserWarning,
+            )
+            return CameraSmtpServer(self.handler, **self.SMTP_kwargs)
 
 
 class CameraEmailHandler:
@@ -310,13 +341,17 @@ async def run(config: Config) -> None:
         # inviting cameras to start AUTH LOGIN only to have it rejected.
         smtp_options = {"auth_exclude_mechanism": ["LOGIN", "PLAIN"]}
 
-    controller = Controller(
+    controller = CameraSmtpController(
         handler,
         hostname=config.smtp_host,
         port=config.smtp_port,
         **smtp_options,
     )
     controller.start()
+    if config.smtp_username:
+        LOGGER.warning(
+            "SMTP authentication is running without TLS; use only on a trusted camera network"
+        )
     LOGGER.info(
         "SMTP listener started on %s:%s (%s)",
         config.smtp_host,

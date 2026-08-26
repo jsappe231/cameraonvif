@@ -23,8 +23,13 @@ class LoginPassword:
         self.password = password
 
 
+class SMTP:
+    pass
+
+
 fake_smtp_module.AuthResult = AuthResult
 fake_smtp_module.LoginPassword = LoginPassword
+fake_smtp_module.SMTP = SMTP
 sys.modules.setdefault("aiosmtpd", types.ModuleType("aiosmtpd"))
 sys.modules.setdefault("aiosmtpd.controller", fake_controller_module)
 sys.modules.setdefault("aiosmtpd.smtp", fake_smtp_module)
