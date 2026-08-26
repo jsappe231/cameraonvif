@@ -1,31 +1,32 @@
-"""Receive camera alert emails locally and forward matching events to Synology.
+"""Receive camera alert emails and forward matching events to UniFi Protect.
 
 This bridge is intended for cameras whose smart analytics events do not appear
 in ONVIF/ODM, but can trigger the camera's built-in "Send Email" linkage.
 It runs a small SMTP listener, accepts those camera emails, matches their
-subject/body, and triggers Synology Surveillance Station via webhook or the
-legacy ExternalEvent API.
+subject/body, and posts a normalized alarm to a UniFi Protect integration URL.
 """
 
 from __future__ import annotations
 
 import asyncio
 import email
+import hmac
 import logging
 import os
 import signal
 import sys
 import time
+import warnings
 from dataclasses import dataclass
 from email.message import Message
 from typing import Any
-from urllib.parse import urljoin
 
 import requests
 from aiosmtpd.controller import Controller
+from aiosmtpd.smtp import AuthResult, LoginPassword, SMTP
 from requests import Response
 
-LOGGER = logging.getLogger("camera-smtp-synology-bridge")
+LOGGER = logging.getLogger("camera-smtp-unifi-protect-bridge")
 STOP_EVENT: asyncio.Event | None = None
 
 
@@ -33,36 +34,31 @@ STOP_EVENT: asyncio.Event | None = None
 class Config:
     smtp_host: str
     smtp_port: int
+    smtp_username: str | None
+    smtp_password: str | None
     match_subject_patterns: tuple[str, ...]
     match_body_patterns: tuple[str, ...]
     ignore_subject_patterns: tuple[str, ...]
     cooldown_seconds: float
-    synology_webhook_url: str | None
-    synology_webhook_method: str
-    synology_base_url: str | None
-    synology_user: str | None
-    synology_password: str | None
-    synology_external_event_id: int
-    synology_timeout_seconds: float
+    unifi_protect_event_url: str
+    unifi_protect_api_key: str | None
+    unifi_protect_camera_id: str | None
+    unifi_protect_timeout_seconds: float
     verify_tls: bool
     max_body_chars: int
 
     @classmethod
     def from_env(cls) -> "Config":
-        webhook_url = os.getenv("SYNOLOGY_WEBHOOK_URL") or None
-        base_url = os.getenv("SYNOLOGY_BASE_URL") or None
-        user = os.getenv("SYNOLOGY_USER") or None
-        password = os.getenv("SYNOLOGY_PASSWORD") or None
-
-        if not webhook_url and not (base_url and user and password):
-            raise ValueError(
-                "Set SYNOLOGY_WEBHOOK_URL, or set SYNOLOGY_BASE_URL, "
-                "SYNOLOGY_USER, and SYNOLOGY_PASSWORD for ExternalEvent mode."
-            )
+        smtp_username = os.getenv("SMTP_USERNAME") or None
+        smtp_password = os.getenv("SMTP_PASSWORD") or None
+        if bool(smtp_username) != bool(smtp_password):
+            raise ValueError("Set both SMTP_USERNAME and SMTP_PASSWORD, or neither.")
 
         return cls(
             smtp_host=os.getenv("SMTP_HOST", "0.0.0.0"),
             smtp_port=int(os.getenv("SMTP_PORT", "8025")),
+            smtp_username=smtp_username,
+            smtp_password=smtp_password,
             match_subject_patterns=csv_env(
                 "MATCH_SUBJECT_PATTERNS",
                 "intrusion,line crossing,human,vehicle,person,alarm",
@@ -70,13 +66,12 @@ class Config:
             match_body_patterns=csv_env("MATCH_BODY_PATTERNS", ""),
             ignore_subject_patterns=csv_env("IGNORE_SUBJECT_PATTERNS", "test email"),
             cooldown_seconds=float(os.getenv("COOLDOWN_SECONDS", "20")),
-            synology_webhook_url=webhook_url,
-            synology_webhook_method=os.getenv("SYNOLOGY_WEBHOOK_METHOD", "POST").upper(),
-            synology_base_url=base_url,
-            synology_user=user,
-            synology_password=password,
-            synology_external_event_id=int(os.getenv("SYNOLOGY_EXTERNAL_EVENT_ID", "1")),
-            synology_timeout_seconds=float(os.getenv("SYNOLOGY_TIMEOUT_SECONDS", "10")),
+            unifi_protect_event_url=required_env("UNIFI_PROTECT_EVENT_URL"),
+            unifi_protect_api_key=os.getenv("UNIFI_PROTECT_API_KEY") or None,
+            unifi_protect_camera_id=os.getenv("UNIFI_PROTECT_CAMERA_ID") or None,
+            unifi_protect_timeout_seconds=float(
+                os.getenv("UNIFI_PROTECT_TIMEOUT_SECONDS", "10")
+            ),
             verify_tls=bool_env("VERIFY_TLS", True),
             max_body_chars=int(os.getenv("MAX_BODY_CHARS", "2000")),
         )
@@ -107,11 +102,76 @@ def bool_env(name: str, default: bool) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def required_env(name: str) -> str:
+    value = os.getenv(name)
+    if not value:
+        raise ValueError(f"Missing required environment variable: {name}")
+    return value
+
+
 def configure_logging() -> None:
     logging.basicConfig(
         level=os.getenv("LOG_LEVEL", "INFO").upper(),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    logging.getLogger("mail.log").setLevel(os.getenv("SMTP_LOG_LEVEL", "ERROR").upper())
+
+
+class SmtpAuthenticator:
+    """Validate the LOGIN or PLAIN credentials supplied by a camera."""
+
+    def __init__(self, username: str, password: str) -> None:
+        self.username = username.encode("utf-8")
+        self.password = password.encode("utf-8")
+
+    def __call__(
+        self,
+        server: Any,
+        session: Any,
+        envelope: Any,
+        mechanism: str,
+        auth_data: Any,
+    ) -> AuthResult:
+        if not isinstance(auth_data, LoginPassword):
+            return AuthResult(success=False, handled=False)
+
+        success = hmac.compare_digest(auth_data.login, self.username) and hmac.compare_digest(
+            auth_data.password, self.password
+        )
+        return AuthResult(
+            success=success,
+            handled=success,
+            auth_data=auth_data if success else None,
+        )
+
+
+class CameraSmtpServer(SMTP):
+    """Support legacy cameras that issue AUTH after HELO instead of EHLO."""
+
+    async def smtp_AUTH(self, arg: str) -> None:
+        assert self.session is not None
+        used_legacy_helo = bool(self.session.host_name and not self.session.extended_smtp)
+        if used_legacy_helo:
+            LOGGER.info("Accepting legacy AUTH after HELO from %s", self.session.peer)
+            self.session.extended_smtp = True
+        try:
+            await super().smtp_AUTH(arg)
+        finally:
+            if used_legacy_helo:
+                self.session.extended_smtp = False
+
+
+class CameraSmtpController(Controller):
+    def factory(self) -> CameraSmtpServer:
+        # aiosmtpd warns for every connection when plaintext AUTH is enabled.
+        # The limitation is documented and logged once by this application.
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message="Requiring AUTH while not requiring TLS.*",
+                category=UserWarning,
+            )
+            return CameraSmtpServer(self.handler, **self.SMTP_kwargs)
 
 
 class CameraEmailHandler:
@@ -141,9 +201,9 @@ class CameraEmailHandler:
             LOGGER.info("Suppressing %r during cooldown", camera_email.event_name)
             return "250 Message accepted"
 
-        send_to_synology(camera_email, self.config)
+        send_to_unifi_protect(camera_email, self.config)
         self.last_sent_at[camera_email.event_name.lower()] = time.monotonic()
-        LOGGER.info("Forwarded camera email alert to Synology: %s", camera_email.event_name)
+        LOGGER.info("Forwarded camera email alert to UniFi Protect: %s", camera_email.event_name)
         return "250 Message accepted"
 
     def in_cooldown(self, camera_email: CameraEmail) -> bool:
@@ -230,61 +290,27 @@ def should_forward(camera_email: CameraEmail, config: Config) -> bool:
     return subject_match or body_match
 
 
-def send_to_synology(camera_email: CameraEmail, config: Config) -> None:
-    if config.synology_webhook_url:
-        send_webhook(camera_email, config)
-    else:
-        trigger_external_event(camera_email, config)
-
-
-def send_webhook(camera_email: CameraEmail, config: Config) -> None:
-    assert config.synology_webhook_url
+def send_to_unifi_protect(camera_email: CameraEmail, config: Config) -> None:
     payload = {
+        "type": "camera-email-alarm",
         "name": camera_email.event_name,
         "source": camera_email.mail_from,
         "description": f"Camera email alert: {camera_email.event_name}",
+        "cameraId": config.unifi_protect_camera_id,
         "subject": camera_email.subject,
         "body": camera_email.body,
-        "message_id": camera_email.message_id,
+        "messageId": camera_email.message_id,
         "recipients": list(camera_email.rcpt_tos),
-        "attachment_count": camera_email.attachment_count,
+        "attachmentCount": camera_email.attachment_count,
     }
-
-    if config.synology_webhook_method == "GET":
-        response = requests.get(
-            config.synology_webhook_url,
-            params=payload,
-            timeout=config.synology_timeout_seconds,
-            verify=config.verify_tls,
-        )
-    else:
-        response = requests.post(
-            config.synology_webhook_url,
-            json=payload,
-            timeout=config.synology_timeout_seconds,
-            verify=config.verify_tls,
-        )
-    check_response(response)
-
-
-def trigger_external_event(camera_email: CameraEmail, config: Config) -> None:
-    assert config.synology_base_url
-    assert config.synology_user
-    assert config.synology_password
-
-    url = urljoin(config.synology_base_url.rstrip("/") + "/", "webapi/entry.cgi")
-    response = requests.get(
-        url,
-        params={
-            "api": "SYNO.SurveillanceStation.ExternalEvent",
-            "method": "Trigger",
-            "version": 1,
-            "eventId": config.synology_external_event_id,
-            "eventName": camera_email.event_name,
-            "account": config.synology_user,
-            "password": config.synology_password,
-        },
-        timeout=config.synology_timeout_seconds,
+    headers = {"Accept": "application/json"}
+    if config.unifi_protect_api_key:
+        headers["X-API-Key"] = config.unifi_protect_api_key
+    response = requests.post(
+        config.unifi_protect_event_url,
+        json=payload,
+        headers=headers,
+        timeout=config.unifi_protect_timeout_seconds,
         verify=config.verify_tls,
     )
     check_response(response)
@@ -295,16 +321,43 @@ def check_response(response: Response) -> None:
     if response.headers.get("content-type", "").startswith("application/json"):
         body = response.json()
         if body.get("success") is False:
-            raise RuntimeError(f"Synology API returned failure: {body}")
+            raise RuntimeError(f"UniFi Protect integration returned failure: {body}")
 
 
 async def run(config: Config) -> None:
     global STOP_EVENT
     STOP_EVENT = asyncio.Event()
     handler = CameraEmailHandler(config)
-    controller = Controller(handler, hostname=config.smtp_host, port=config.smtp_port)
+    smtp_options: dict[str, Any]
+    if config.smtp_username and config.smtp_password:
+        smtp_options = {
+            "authenticator": SmtpAuthenticator(config.smtp_username, config.smtp_password),
+            "auth_required": True,
+            # Camera appliances commonly support AUTH only over local, plaintext SMTP.
+            "auth_require_tls": False,
+        }
+    else:
+        # Do not advertise AUTH when no credentials were configured. This avoids
+        # inviting cameras to start AUTH LOGIN only to have it rejected.
+        smtp_options = {"auth_exclude_mechanism": ["LOGIN", "PLAIN"]}
+
+    controller = CameraSmtpController(
+        handler,
+        hostname=config.smtp_host,
+        port=config.smtp_port,
+        **smtp_options,
+    )
     controller.start()
-    LOGGER.info("SMTP listener started on %s:%s", config.smtp_host, config.smtp_port)
+    if config.smtp_username:
+        LOGGER.warning(
+            "SMTP authentication is running without TLS; use only on a trusted camera network"
+        )
+    LOGGER.info(
+        "SMTP listener started on %s:%s (%s)",
+        config.smtp_host,
+        config.smtp_port,
+        "authentication required" if config.smtp_username else "authentication disabled",
+    )
     try:
         await STOP_EVENT.wait()
     finally:
