@@ -22,9 +22,12 @@ from email.message import Message
 from typing import Any
 
 import requests
+import urllib3
 from aiosmtpd.controller import Controller
 from aiosmtpd.smtp import AuthResult, LoginPassword, SMTP
 from requests import Response
+from requests.exceptions import RequestException
+from urllib3.exceptions import InsecureRequestWarning
 
 LOGGER = logging.getLogger("camera-smtp-unifi-protect-bridge")
 STOP_EVENT: asyncio.Event | None = None
@@ -64,7 +67,7 @@ class Config:
                 "intrusion,line crossing,human,vehicle,person,alarm",
             ),
             match_body_patterns=csv_env("MATCH_BODY_PATTERNS", ""),
-            ignore_subject_patterns=csv_env("IGNORE_SUBJECT_PATTERNS", "test email"),
+            ignore_subject_patterns=csv_env("IGNORE_SUBJECT_PATTERNS", "test email,smtp test"),
             cooldown_seconds=float(os.getenv("COOLDOWN_SECONDS", "20")),
             unifi_protect_event_url=required_env("UNIFI_PROTECT_EVENT_URL"),
             unifi_protect_api_key=os.getenv("UNIFI_PROTECT_API_KEY") or None,
@@ -201,7 +204,17 @@ class CameraEmailHandler:
             LOGGER.info("Suppressing %r during cooldown", camera_email.event_name)
             return "250 Message accepted"
 
-        send_to_unifi_protect(camera_email, self.config)
+        try:
+            send_to_unifi_protect(camera_email, self.config)
+        except RequestException as error:
+            LOGGER.error(
+                "Event delivery failed for %r: %s",
+                camera_email.event_name,
+                describe_delivery_error(error),
+            )
+            # A temporary SMTP failure lets cameras with retry support try again,
+            # without allowing a requests traceback to escape into aiosmtpd.
+            return "451 Event destination temporarily unavailable"
         self.last_sent_at[camera_email.event_name.lower()] = time.monotonic()
         LOGGER.info("Forwarded camera email alert to UniFi Protect: %s", camera_email.event_name)
         return "250 Message accepted"
@@ -317,11 +330,31 @@ def send_to_unifi_protect(camera_email: CameraEmail, config: Config) -> None:
 
 
 def check_response(response: Response) -> None:
-    response.raise_for_status()
+    try:
+        response.raise_for_status()
+    except requests.HTTPError as error:
+        if response.status_code in {404, 405}:
+            raise requests.HTTPError(
+                f"HTTP {response.status_code}: this URL is not an inbound event endpoint. "
+                "UniFi Protect consoles do not provide a /protect-event receiver; "
+                "configure the URL of a compatible automation relay instead.",
+                response=response,
+            ) from error
+        raise
     if response.headers.get("content-type", "").startswith("application/json"):
         body = response.json()
         if body.get("success") is False:
-            raise RuntimeError(f"UniFi Protect integration returned failure: {body}")
+            raise requests.HTTPError(
+                f"Event integration returned failure: {body}",
+                response=response,
+            )
+
+
+def describe_delivery_error(error: RequestException) -> str:
+    response = error.response
+    if response is None:
+        return str(error)
+    return f"{error} (destination={response.url})"
 
 
 async def run(config: Config) -> None:
@@ -348,6 +381,9 @@ async def run(config: Config) -> None:
         **smtp_options,
     )
     controller.start()
+    if not config.verify_tls:
+        urllib3.disable_warnings(category=InsecureRequestWarning)
+        LOGGER.warning("TLS certificate verification is disabled for the event destination")
     if config.smtp_username:
         LOGGER.warning(
             "SMTP authentication is running without TLS; use only on a trusted camera network"

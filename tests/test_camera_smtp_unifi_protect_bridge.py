@@ -1,44 +1,8 @@
 import importlib
-import sys
-import types
 import unittest
 
-
-fake_controller_module = types.ModuleType("aiosmtpd.controller")
-fake_controller_module.Controller = object
-fake_smtp_module = types.ModuleType("aiosmtpd.smtp")
-
-
-class AuthResult:
-    def __init__(self, *, success, handled=True, message=None, auth_data=None):
-        self.success = success
-        self.handled = handled
-        self.message = message
-        self.auth_data = auth_data
-
-
-class LoginPassword:
-    def __init__(self, login, password):
-        self.login = login
-        self.password = password
-
-
-class SMTP:
-    pass
-
-
-fake_smtp_module.AuthResult = AuthResult
-fake_smtp_module.LoginPassword = LoginPassword
-fake_smtp_module.SMTP = SMTP
-sys.modules.setdefault("aiosmtpd", types.ModuleType("aiosmtpd"))
-sys.modules.setdefault("aiosmtpd.controller", fake_controller_module)
-sys.modules.setdefault("aiosmtpd.smtp", fake_smtp_module)
-
-fake_requests = types.ModuleType("requests")
-fake_requests.Response = object
-fake_requests.get = lambda *args, **kwargs: None
-fake_requests.post = lambda *args, **kwargs: None
-sys.modules.setdefault("requests", fake_requests)
+import requests
+from aiosmtpd.smtp import LoginPassword
 
 bridge = importlib.import_module("camera_smtp_unifi_protect_bridge")
 
@@ -54,7 +18,7 @@ class CameraSmtpBridgeTest(unittest.TestCase):
             match_body_patterns=("line crossing",),
             ignore_subject_patterns=("test email",),
             cooldown_seconds=20,
-            unifi_protect_event_url="https://console.local/protect-event",
+            unifi_protect_event_url="https://automation.local/hooks/camera-event",
             unifi_protect_api_key="secret",
             unifi_protect_camera_id="camera-id",
             unifi_protect_timeout_seconds=10,
@@ -108,6 +72,25 @@ class CameraSmtpBridgeTest(unittest.TestCase):
 
         self.assertFalse(bridge.should_forward(camera_email, self.config()))
 
+    def test_ignore_camera_smtp_test(self):
+        camera_email = bridge.CameraEmail(
+            mail_from="camera@example.local",
+            rcpt_tos=("protect@example.local",),
+            subject="IP Camera: Smtp Test",
+            body="",
+            message_id="",
+            attachment_count=0,
+        )
+        config = self.config()
+        config = bridge.Config(
+            **{
+                **config.__dict__,
+                "ignore_subject_patterns": ("test email", "smtp test"),
+            }
+        )
+
+        self.assertFalse(bridge.should_forward(camera_email, config))
+
     def test_matching_body_forwards(self):
         camera_email = bridge.CameraEmail(
             mail_from="camera@example.local",
@@ -138,7 +121,7 @@ class CameraSmtpBridgeTest(unittest.TestCase):
             bridge.requests.post = original_post
 
         args, kwargs = calls[0]
-        self.assertEqual(args[0], "https://console.local/protect-event")
+        self.assertEqual(args[0], "https://automation.local/hooks/camera-event")
         self.assertEqual(kwargs["headers"]["X-API-Key"], "secret")
         self.assertEqual(kwargs["json"]["type"], "camera-email-alarm")
         self.assertEqual(kwargs["json"]["cameraId"], "camera-id")
@@ -159,8 +142,18 @@ class CameraSmtpBridgeTest(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertFalse(result.handled)
 
+    def test_405_explains_that_console_is_not_an_event_receiver(self):
+        response = requests.Response()
+        response.status_code = 405
+        response.url = "https://unifi.example.local/protect-event"
+
+        with self.assertRaisesRegex(requests.HTTPError, "not an inbound event endpoint"):
+            bridge.check_response(response)
+
 
 class FakeResponse:
+    status_code = 200
+    url = "https://automation.local/hooks/camera-event"
     headers = {"content-type": "application/json"}
 
     def raise_for_status(self):

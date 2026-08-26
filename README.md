@@ -10,12 +10,13 @@ Camera smart event -> camera Send Email action -> local SMTP listener
                    -> UniFi Protect event/integration URL
 ```
 
-> **Compatibility note:** Protect releases differ in which inbound integrations
-> they expose. `UNIFI_PROTECT_EVENT_URL` must be an **inbound** HTTP endpoint
-> supplied by your Protect release or by automation connected to Protect. A
-> Protect Alarm Manager *outbound webhook action* is not an inbound URL and
-> cannot be used here. The bridge deliberately makes the destination URL
-> configurable instead of depending on a private, version-specific Protect API.
+> **Important limitation:** UniFi Protect does not expose a generic inbound
+> `/protect-event` HTTP endpoint and its Alarm Manager webhooks are outbound
+> actions. Do not set `UNIFI_PROTECT_EVENT_URL` to your console plus
+> `/protect-event`; that URL returns `404` or `405`. The value must be a genuine
+> inbound endpoint from automation or middleware connected to Protect. Protect's
+> public integration API can read Protect events, but does not provide an API for
+> injecting an arbitrary third-party smart-detection event into its timeline.
 
 ## Camera setup
 
@@ -39,8 +40,9 @@ the credentials protect against accidental senders but are not encrypted in tran
 
 ## UniFi Protect setup
 
-1. Create or identify an inbound event URL in your Protect version or Protect
-   automation and obtain its API key if required.
+1. Create or identify an inbound event URL in Protect-connected automation or
+   middleware and obtain its API key if required. The Protect console itself is
+   not this receiver.
 2. Put that complete URL in `UNIFI_PROTECT_EVENT_URL`.
 3. Put the key in `UNIFI_PROTECT_API_KEY`. It is sent as `X-API-Key`.
 4. Optionally set `UNIFI_PROTECT_CAMERA_ID` so the receiver can associate the
@@ -78,7 +80,7 @@ docker compose logs -f
 
 | Variable | Required | Description |
 | --- | --- | --- |
-| `UNIFI_PROTECT_EVENT_URL` | yes | Complete inbound Protect/integration HTTP URL. |
+| `UNIFI_PROTECT_EVENT_URL` | yes | Complete inbound automation/middleware URL; never a made-up path on the Protect console. |
 | `UNIFI_PROTECT_API_KEY` | no | API key sent in the `X-API-Key` header. |
 | `UNIFI_PROTECT_CAMERA_ID` | no | Protect camera identifier added as `cameraId`. |
 | `UNIFI_PROTECT_TIMEOUT_SECONDS` | no | HTTP timeout; defaults to `10`. |
@@ -88,7 +90,7 @@ docker compose logs -f
 | `SMTP_PASSWORD` | no | SMTP password for camera LOGIN/PLAIN authentication. Must be set with `SMTP_USERNAME`. |
 | `MATCH_SUBJECT_PATTERNS` | no | Comma-separated subject fragments; defaults to `intrusion,line crossing,human,vehicle,person,alarm`. |
 | `MATCH_BODY_PATTERNS` | no | Optional comma-separated body fragments. |
-| `IGNORE_SUBJECT_PATTERNS` | no | Ignored subject fragments; defaults to `test email`. |
+| `IGNORE_SUBJECT_PATTERNS` | no | Ignored subject fragments; defaults to `test email,smtp test`. |
 | `COOLDOWN_SECONDS` | no | Per-subject suppression window; defaults to `20`. |
 | `MAX_BODY_CHARS` | no | Maximum body length in the JSON; defaults to `2000`. |
 | `VERIFY_TLS` | no | Verify destination TLS; defaults to `true`. Only disable for a trusted self-signed local endpoint. |
@@ -105,4 +107,6 @@ docker compose logs -f
 4. Trigger a real event and verify its subject matches a configured pattern.
 5. A non-2xx destination response is logged and returned to the camera as an
    SMTP processing failure, allowing the camera to retry where supported.
-6. Do not place a Protect outbound webhook URL in `UNIFI_PROTECT_EVENT_URL`.
+6. A `404` or `405` means the configured URL is not an inbound receiver. In
+   particular, `https://your-console/protect-event` is not a Protect API route.
+7. Do not place a Protect outbound webhook URL in `UNIFI_PROTECT_EVENT_URL`.

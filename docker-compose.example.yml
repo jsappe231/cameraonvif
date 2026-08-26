@@ -13,14 +13,15 @@ services:
       SMTP_USERNAME: "camera"
       SMTP_PASSWORD: "replace-with-camera-smtp-password"
 
-      # An inbound URL supplied by your Protect version or Protect automation.
-      UNIFI_PROTECT_EVENT_URL: "https://unifi-console.example.local/protect-event"
-      UNIFI_PROTECT_API_KEY: "replace-with-protect-api-key"
+      # A real inbound URL from automation connected to Protect. Do not point this
+      # at the UniFi console: Protect has no generic /protect-event endpoint.
+      UNIFI_PROTECT_EVENT_URL: "https://automation.example.local/hooks/camera-event"
+      UNIFI_PROTECT_API_KEY: "replace-with-automation-api-key"
       # Optional Protect camera identifier included in every event.
       UNIFI_PROTECT_CAMERA_ID: ""
 
       MATCH_SUBJECT_PATTERNS: "intrusion,line crossing,human,vehicle,person,alarm"
       MATCH_BODY_PATTERNS: ""
-      IGNORE_SUBJECT_PATTERNS: "test email"
+      IGNORE_SUBJECT_PATTERNS: "test email,smtp test"
       COOLDOWN_SECONDS: "20"
       VERIFY_TLS: "true"
