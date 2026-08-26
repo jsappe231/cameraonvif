@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import email
+import hmac
 import logging
 import os
 import signal
@@ -21,6 +22,7 @@ from typing import Any
 
 import requests
 from aiosmtpd.controller import Controller
+from aiosmtpd.smtp import AuthResult, LoginPassword
 from requests import Response
 
 LOGGER = logging.getLogger("camera-smtp-unifi-protect-bridge")
@@ -31,6 +33,8 @@ STOP_EVENT: asyncio.Event | None = None
 class Config:
     smtp_host: str
     smtp_port: int
+    smtp_username: str | None
+    smtp_password: str | None
     match_subject_patterns: tuple[str, ...]
     match_body_patterns: tuple[str, ...]
     ignore_subject_patterns: tuple[str, ...]
@@ -44,9 +48,16 @@ class Config:
 
     @classmethod
     def from_env(cls) -> "Config":
+        smtp_username = os.getenv("SMTP_USERNAME") or None
+        smtp_password = os.getenv("SMTP_PASSWORD") or None
+        if bool(smtp_username) != bool(smtp_password):
+            raise ValueError("Set both SMTP_USERNAME and SMTP_PASSWORD, or neither.")
+
         return cls(
             smtp_host=os.getenv("SMTP_HOST", "0.0.0.0"),
             smtp_port=int(os.getenv("SMTP_PORT", "8025")),
+            smtp_username=smtp_username,
+            smtp_password=smtp_password,
             match_subject_patterns=csv_env(
                 "MATCH_SUBJECT_PATTERNS",
                 "intrusion,line crossing,human,vehicle,person,alarm",
@@ -102,6 +113,34 @@ def configure_logging() -> None:
         level=os.getenv("LOG_LEVEL", "INFO").upper(),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+
+
+class SmtpAuthenticator:
+    """Validate the LOGIN or PLAIN credentials supplied by a camera."""
+
+    def __init__(self, username: str, password: str) -> None:
+        self.username = username.encode("utf-8")
+        self.password = password.encode("utf-8")
+
+    def __call__(
+        self,
+        server: Any,
+        session: Any,
+        envelope: Any,
+        mechanism: str,
+        auth_data: Any,
+    ) -> AuthResult:
+        if not isinstance(auth_data, LoginPassword):
+            return AuthResult(success=False, handled=False)
+
+        success = hmac.compare_digest(auth_data.login, self.username) and hmac.compare_digest(
+            auth_data.password, self.password
+        )
+        return AuthResult(
+            success=success,
+            handled=success,
+            auth_data=auth_data if success else None,
+        )
 
 
 class CameraEmailHandler:
@@ -258,9 +297,32 @@ async def run(config: Config) -> None:
     global STOP_EVENT
     STOP_EVENT = asyncio.Event()
     handler = CameraEmailHandler(config)
-    controller = Controller(handler, hostname=config.smtp_host, port=config.smtp_port)
+    smtp_options: dict[str, Any]
+    if config.smtp_username and config.smtp_password:
+        smtp_options = {
+            "authenticator": SmtpAuthenticator(config.smtp_username, config.smtp_password),
+            "auth_required": True,
+            # Camera appliances commonly support AUTH only over local, plaintext SMTP.
+            "auth_require_tls": False,
+        }
+    else:
+        # Do not advertise AUTH when no credentials were configured. This avoids
+        # inviting cameras to start AUTH LOGIN only to have it rejected.
+        smtp_options = {"auth_exclude_mechanism": ["LOGIN", "PLAIN"]}
+
+    controller = Controller(
+        handler,
+        hostname=config.smtp_host,
+        port=config.smtp_port,
+        **smtp_options,
+    )
     controller.start()
-    LOGGER.info("SMTP listener started on %s:%s", config.smtp_host, config.smtp_port)
+    LOGGER.info(
+        "SMTP listener started on %s:%s (%s)",
+        config.smtp_host,
+        config.smtp_port,
+        "authentication required" if config.smtp_username else "authentication disabled",
+    )
     try:
         await STOP_EVENT.wait()
     finally:

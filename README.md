@@ -27,11 +27,15 @@ mail settings as follows:
 | SMTP server | Address of the Docker host running this bridge |
 | SMTP port | `8025` (default) |
 | TLS/SSL | Off |
-| Authentication | Off, if supported |
+| Authentication | Off, or LOGIN/PLAIN with `SMTP_USERNAME` and `SMTP_PASSWORD` |
 | Sender / recipient | Any valid-looking local addresses |
 
 If the camera requires port 25, map `25:8025` instead. Binding port 25 may need
 additional host privileges or firewall configuration.
+
+SMTP authentication from these cameras is normally plaintext LOGIN/PLAIN because
+they do not support STARTTLS. Use it only on a trusted, isolated camera network;
+the credentials protect against accidental senders but are not encrypted in transit.
 
 ## UniFi Protect setup
 
@@ -80,6 +84,8 @@ docker compose logs -f
 | `UNIFI_PROTECT_TIMEOUT_SECONDS` | no | HTTP timeout; defaults to `10`. |
 | `SMTP_HOST` | no | SMTP bind address; defaults to `0.0.0.0`. |
 | `SMTP_PORT` | no | SMTP listener port; defaults to `8025`. |
+| `SMTP_USERNAME` | no | SMTP username for camera LOGIN/PLAIN authentication. Must be set with `SMTP_PASSWORD`. |
+| `SMTP_PASSWORD` | no | SMTP password for camera LOGIN/PLAIN authentication. Must be set with `SMTP_USERNAME`. |
 | `MATCH_SUBJECT_PATTERNS` | no | Comma-separated subject fragments; defaults to `intrusion,line crossing,human,vehicle,person,alarm`. |
 | `MATCH_BODY_PATTERNS` | no | Optional comma-separated body fragments. |
 | `IGNORE_SUBJECT_PATTERNS` | no | Ignored subject fragments; defaults to `test email`. |
@@ -91,8 +97,10 @@ docker compose logs -f
 ## Troubleshooting
 
 1. Watch `docker compose logs -f` while using the camera's Test Email button.
-2. Test emails are ignored by default. Confirm the log says they were received.
-3. Trigger a real event and verify its subject matches a configured pattern.
-4. A non-2xx destination response is logged and returned to the camera as an
+2. If the log ends at `AUTH LOGIN`, set both `SMTP_USERNAME` and `SMTP_PASSWORD`
+   to the same credentials configured in the camera, then recreate the container.
+3. Test emails are ignored by default. Confirm the log says they were received.
+4. Trigger a real event and verify its subject matches a configured pattern.
+5. A non-2xx destination response is logged and returned to the camera as an
    SMTP processing failure, allowing the camera to retry where supported.
-5. Do not place a Protect outbound webhook URL in `UNIFI_PROTECT_EVENT_URL`.
+6. Do not place a Protect outbound webhook URL in `UNIFI_PROTECT_EVENT_URL`.

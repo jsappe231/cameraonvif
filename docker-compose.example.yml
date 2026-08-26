@@ -9,6 +9,9 @@ services:
     environment:
       SMTP_HOST: "0.0.0.0"
       SMTP_PORT: "8025"
+      # Set both values when the camera is configured to use SMTP AUTH LOGIN/PLAIN.
+      SMTP_USERNAME: "camera"
+      SMTP_PASSWORD: "replace-with-camera-smtp-password"
 
       # An inbound URL supplied by your Protect version or Protect automation.
       UNIFI_PROTECT_EVENT_URL: "https://unifi-console.example.local/protect-event"

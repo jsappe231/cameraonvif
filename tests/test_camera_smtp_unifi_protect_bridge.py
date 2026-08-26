@@ -6,8 +6,28 @@ import unittest
 
 fake_controller_module = types.ModuleType("aiosmtpd.controller")
 fake_controller_module.Controller = object
+fake_smtp_module = types.ModuleType("aiosmtpd.smtp")
+
+
+class AuthResult:
+    def __init__(self, *, success, handled=True, message=None, auth_data=None):
+        self.success = success
+        self.handled = handled
+        self.message = message
+        self.auth_data = auth_data
+
+
+class LoginPassword:
+    def __init__(self, login, password):
+        self.login = login
+        self.password = password
+
+
+fake_smtp_module.AuthResult = AuthResult
+fake_smtp_module.LoginPassword = LoginPassword
 sys.modules.setdefault("aiosmtpd", types.ModuleType("aiosmtpd"))
 sys.modules.setdefault("aiosmtpd.controller", fake_controller_module)
+sys.modules.setdefault("aiosmtpd.smtp", fake_smtp_module)
 
 fake_requests = types.ModuleType("requests")
 fake_requests.Response = object
@@ -23,6 +43,8 @@ class CameraSmtpBridgeTest(unittest.TestCase):
         return bridge.Config(
             smtp_host="0.0.0.0",
             smtp_port=8025,
+            smtp_username="camera",
+            smtp_password="password",
             match_subject_patterns=("intrusion", "human"),
             match_body_patterns=("line crossing",),
             ignore_subject_patterns=("test email",),
@@ -116,6 +138,21 @@ class CameraSmtpBridgeTest(unittest.TestCase):
         self.assertEqual(kwargs["json"]["type"], "camera-email-alarm")
         self.assertEqual(kwargs["json"]["cameraId"], "camera-id")
         self.assertEqual(kwargs["json"]["attachmentCount"], 1)
+
+    def test_smtp_authenticator_accepts_matching_credentials(self):
+        authenticator = bridge.SmtpAuthenticator("camera", "password")
+
+        result = authenticator(None, None, None, "LOGIN", LoginPassword(b"camera", b"password"))
+
+        self.assertTrue(result.success)
+
+    def test_smtp_authenticator_rejects_bad_credentials(self):
+        authenticator = bridge.SmtpAuthenticator("camera", "password")
+
+        result = authenticator(None, None, None, "LOGIN", LoginPassword(b"camera", b"wrong"))
+
+        self.assertFalse(result.success)
+        self.assertFalse(result.handled)
 
 
 class FakeResponse:
