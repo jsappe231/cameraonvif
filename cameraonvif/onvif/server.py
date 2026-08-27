@@ -4,17 +4,18 @@ from xml.etree import ElementTree as ET
 from aiohttp import web
 from ..config import Config
 from ..motion import MotionManager
+from ..rtsp import RtspRelayRegistry
 from .auth import authenticate,WSSE
 from .device import response as device_response
 from .events import duration_seconds,event_properties,pull_response,subscription_response,termination
 from .upstream import proxy_media
 from .xml import *
 LOGGER=logging.getLogger(__name__)
-DEVICE_ACTIONS={"GetCapabilities","GetServices","GetDeviceInformation","GetSystemDateAndTime","GetScopes","GetHostname"}
+DEVICE_ACTIONS={"GetCapabilities","GetServices","GetDeviceInformation","GetSystemDateAndTime","GetScopes","GetHostname","GetNetworkInterfaces"}
 
 class OnvifServer:
-    def __init__(self,c:Config,motion:MotionManager):
-        self.c=c; self.motion=motion; self.smtp_running=False
+    def __init__(self,c:Config,motion:MotionManager,relay:RtspRelayRegistry):
+        self.c=c; self.motion=motion; self.relay=relay; self.smtp_running=False; self.upstream_camera=False
     def app(self):
         app=web.Application(client_max_size=2*1024*1024)
         app.router.add_get("/health",self.health)
@@ -25,7 +26,8 @@ class OnvifServer:
         app.router.add_post("/onvif/subscriptions/{sid}",self.soap)
         return app
     async def health(self,request):
-        return web.json_response({"status":"ok","smtp":self.smtp_running,"activeSubscriptions":len(self.motion.subscriptions),"motionActive":self.motion.active})
+        relay_health=await asyncio.to_thread(self.relay.health)
+        return web.json_response({"status":"ok","upstreamCamera":self.upstream_camera,"smtp":self.smtp_running,"activeSubscriptions":len(self.motion.subscriptions),"motionActive":self.motion.active,"rtsp":relay_health})
     async def debug_motion(self,request):
         if not self.c.enable_debug_endpoints: raise web.HTTPNotFound()
         await self.motion.trigger(); return web.json_response({"motionActive":True})
@@ -47,7 +49,8 @@ class OnvifServer:
             if request.path.endswith("device_service") and action in DEVICE_ACTIONS:
                 return self.xml_response(device_response(action,self.c,soap))
             if request.path.endswith("media_service"):
-                status,body,content_type=await asyncio.to_thread(proxy_media,data,request.content_type,request.headers.get("SOAPAction"),self.c)
+                status,body,content_type=await asyncio.to_thread(proxy_media,data,request.content_type,request.headers.get("SOAPAction"),self.c,self.relay)
+                self.upstream_camera=200 <= status < 500
                 LOGGER.info("%s proxied to upstream camera",action)
                 return web.Response(status=status,body=body,content_type=content_type.split(";")[0])
             if request.path.endswith("events_service"):

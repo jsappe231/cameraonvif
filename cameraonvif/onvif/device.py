@@ -30,4 +30,13 @@ def response(action:str,c:Config,soap:str)->bytes:
             scope=ET.SubElement(node,q(TDS,"Scopes")); ET.SubElement(scope,q(TT,"ScopeDef")).text="Fixed"; ET.SubElement(scope,q(TT,"ScopeItem")).text=value
     elif action=="GetHostname":
         info=ET.SubElement(node,q(TDS,"HostnameInformation")); ET.SubElement(info,q(TT,"FromDHCP")).text="false"; ET.SubElement(info,q(TT,"Name")).text="cameraonvif-bridge"
+    elif action=="GetNetworkInterfaces":
+        interface=ET.SubElement(node,q(TDS,"NetworkInterfaces"),{"token":"eth0"})
+        ET.SubElement(interface,q(TT,"Enabled")).text="true"
+        info=ET.SubElement(interface,q(TT,"Info")); ET.SubElement(info,q(TT,"Name")).text="eth0"
+        ipv4=ET.SubElement(interface,q(TT,"IPv4")); ET.SubElement(ipv4,q(TT,"Enabled")).text="true"
+        config=ET.SubElement(ipv4,q(TT,"Config"))
+        manual=ET.SubElement(config,q(TT,"Manual")); ET.SubElement(manual,q(TT,"Address")).text=c.onvif_advertised_host
+        ET.SubElement(manual,q(TT,"PrefixLength")).text=str(c.network_prefix_length)
+        ET.SubElement(config,q(TT,"DHCP")).text="false"
     return envelope(node,soap)

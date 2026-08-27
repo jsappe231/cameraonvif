@@ -3,11 +3,13 @@ import asyncio,logging,os,signal
 from aiohttp import web
 from .config import Config
 from .motion import MotionManager
+from .rtsp import RtspRelayRegistry
 from .onvif.server import OnvifServer
 from .smtp_server import start_smtp
 
 async def run(c:Config):
-    motion=MotionManager(c.motion_duration,c.subscription_ttl); server=OnvifServer(c,motion)
+    motion=MotionManager(c.motion_duration,c.subscription_ttl)
+    relay=RtspRelayRegistry(c); server=OnvifServer(c,motion,relay)
     runner=web.AppRunner(server.app()); await runner.setup()
     site=web.TCPSite(runner,c.onvif_bind_host,c.onvif_port); await site.start()
     smtp=start_smtp(c,asyncio.get_running_loop(),motion.trigger); server.smtp_running=True

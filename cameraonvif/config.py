@@ -27,6 +27,11 @@ class Config:
     motion_duration: float; motion_cooldown: float; subscription_ttl: float
     auth_clock_tolerance: float; verify_upstream_tls: bool
     enable_debug_endpoints: bool; stable_uuid: str
+    network_prefix_length: int
+    rtsp_bind_host: str; rtsp_advertised_host: str; rtsp_port: int
+    rtsp_username: str; rtsp_password: str
+    camera_rtsp_username: str; camera_rtsp_password: str
+    rtsp_control_url: str; rtsp_control_username: str; rtsp_control_password: str
 
     @property
     def base_url(self) -> str:
@@ -39,10 +44,13 @@ class Config:
             raise ValueError("Set both SMTP_USERNAME and SMTP_PASSWORD, or neither")
         host, port = required("CAMERA_ONVIF_HOST"), int(os.getenv("CAMERA_ONVIF_PORT", "80"))
         scheme = os.getenv("CAMERA_ONVIF_SCHEME", "http")
+        onvif_host = required("ONVIF_ADVERTISED_HOST")
+        onvif_user, onvif_password = required("ONVIF_USERNAME"), required("ONVIF_PASSWORD")
+        camera_user, camera_password = required("CAMERA_USERNAME"), required("CAMERA_PASSWORD")
         return cls(
             os.getenv("ONVIF_BIND_HOST", "0.0.0.0"), int(os.getenv("ONVIF_PORT", "8080")),
-            required("ONVIF_ADVERTISED_HOST"), required("ONVIF_USERNAME"), required("ONVIF_PASSWORD"),
-            host, port, required("CAMERA_USERNAME"), required("CAMERA_PASSWORD"),
+            onvif_host, onvif_user, onvif_password,
+            host, port, camera_user, camera_password,
             os.getenv("CAMERA_MEDIA_URL", f"{scheme}://{host}:{port}/onvif/media_service"),
             os.getenv("SMTP_HOST", "0.0.0.0"), int(os.getenv("SMTP_PORT", "8025")), smtp_user, smtp_password,
             csv_env("MATCH_SUBJECT_PATTERNS", "human,person,intrusion,line crossing,vehicle,alarm"),
@@ -53,4 +61,13 @@ class Config:
             float(os.getenv("ONVIF_AUTH_CLOCK_TOLERANCE_SECONDS", "300")),
             bool_env("VERIFY_UPSTREAM_TLS", True), bool_env("ENABLE_DEBUG_ENDPOINTS"),
             os.getenv("ONVIF_DEVICE_UUID", "2fc995e1-9d08-5d38-97d3-cc5f5b0c72a1"),
+            int(os.getenv("ONVIF_NETWORK_PREFIX_LENGTH", "24")),
+            os.getenv("RTSP_BIND_HOST", "0.0.0.0"),
+            os.getenv("RTSP_ADVERTISED_HOST", onvif_host), int(os.getenv("RTSP_PORT", "8554")),
+            os.getenv("RTSP_USERNAME", onvif_user), os.getenv("RTSP_PASSWORD", onvif_password),
+            os.getenv("CAMERA_RTSP_USERNAME", camera_user),
+            os.getenv("CAMERA_RTSP_PASSWORD", camera_password),
+            os.getenv("RTSP_CONTROL_URL", "http://mediamtx:9997"),
+            os.getenv("RTSP_CONTROL_USERNAME", "bridge-api"),
+            os.getenv("RTSP_CONTROL_PASSWORD", "change-me-api"),
         )
