@@ -1,3 +1,4 @@
+aiohttp==3.11.11
 aiosmtpd==1.4.6
 requests==2.32.3
 urllib3==2.2.3

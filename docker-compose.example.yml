@@ -1,26 +1,68 @@
+x-rtsp-username: &rtsp-username "admin"
+x-rtsp-password: &rtsp-password "change-me"
+x-rtsp-api-username: &rtsp-api-username "bridge-api"
+x-rtsp-api-password: &rtsp-api-password "change-me-api"
+
 services:
-  camera-smtp-synology-bridge:
+  camera-onvif-bridge:
     build: .
-    container_name: camera-smtp-synology-bridge
+    container_name: camera-onvif-bridge
     restart: unless-stopped
+    depends_on:
+      - mediamtx
     ports:
-      # Point the camera's SMTP server at this host and port.
+      - "8080:8080"
       - "8025:8025"
     environment:
+      ONVIF_BIND_HOST: "0.0.0.0"
+      ONVIF_PORT: "8080"
+      ONVIF_ADVERTISED_HOST: "192.168.88.200"
+      ONVIF_NETWORK_PREFIX_LENGTH: "24"
+      ONVIF_USERNAME: "admin"
+      ONVIF_PASSWORD: "change-me"
+      CAMERA_ONVIF_HOST: "192.168.88.50"
+      CAMERA_ONVIF_PORT: "80"
+      CAMERA_USERNAME: "admin"
+      CAMERA_PASSWORD: "change-me"
+      CAMERA_RTSP_USERNAME: "admin"
+      CAMERA_RTSP_PASSWORD: "change-me"
+      # CAMERA_MEDIA_URL: "http://192.168.88.50/onvif/media_service"
+      RTSP_ADVERTISED_HOST: "192.168.88.200"
+      RTSP_PORT: "8554"
+      RTSP_USERNAME: *rtsp-username
+      RTSP_PASSWORD: *rtsp-password
+      RTSP_CONTROL_URL: "http://mediamtx:9997"
+      RTSP_CONTROL_USERNAME: *rtsp-api-username
+      RTSP_CONTROL_PASSWORD: *rtsp-api-password
       SMTP_HOST: "0.0.0.0"
       SMTP_PORT: "8025"
+      SMTP_USERNAME: "camera"
+      SMTP_PASSWORD: "change-me"
+      MATCH_SUBJECT_PATTERNS: "human,person,intrusion,line crossing,vehicle,alarm"
+      IGNORE_SUBJECT_PATTERNS: "test email,smtp test"
+      MOTION_EVENT_DURATION_SECONDS: "5"
+      MOTION_COOLDOWN_SECONDS: "10"
+      LOG_LEVEL: "INFO"
+      ENABLE_DEBUG_ENDPOINTS: "false"
 
-      # Prefer this if Surveillance Station Action Rule exposes Event source: Webhook.
-      SYNOLOGY_WEBHOOK_URL: "https://nas.example.local:5001/webapi/entry.cgi?..."
-      SYNOLOGY_WEBHOOK_METHOD: "POST"
-      # Or use the legacy ExternalEvent API instead of SYNOLOGY_WEBHOOK_URL.
-      # SYNOLOGY_BASE_URL: "https://nas.example.local:5001"
-      # SYNOLOGY_USER: "surveillance-user"
-      # SYNOLOGY_PASSWORD: "change-me"
-      # SYNOLOGY_EXTERNAL_EVENT_ID: "1"
-
-      MATCH_SUBJECT_PATTERNS: "intrusion,line crossing,human,vehicle,person,alarm"
-      MATCH_BODY_PATTERNS: ""
-      IGNORE_SUBJECT_PATTERNS: "test email"
-      COOLDOWN_SECONDS: "20"
-      VERIFY_TLS: "true"
+  mediamtx:
+    image: bluenviron/mediamtx:1.11.3
+    container_name: camera-onvif-mediamtx
+    restart: unless-stopped
+    ports:
+      - "8554:8554"
+    environment:
+      MTX_RTSPADDRESS: ":8554"
+      MTX_RTSPTRANSPORTS: "[udp, tcp]"
+      MTX_API: "yes"
+      MTX_APIADDRESS: ":9997"
+      # Protect commonly reuses its ONVIF credentials for RTSP.
+      MTX_AUTHMETHOD: "internal"
+      MTX_AUTHINTERNALUSERS_0_USER: *rtsp-username
+      MTX_AUTHINTERNALUSERS_0_PASS: *rtsp-password
+      MTX_AUTHINTERNALUSERS_0_PERMISSIONS_0_ACTION: "read"
+      MTX_AUTHINTERNALUSERS_0_PERMISSIONS_0_PATH: "~^profile-"
+      # Control API user used only on the private Compose network.
+      MTX_AUTHINTERNALUSERS_1_USER: *rtsp-api-username
+      MTX_AUTHINTERNALUSERS_1_PASS: *rtsp-api-password
+      MTX_AUTHINTERNALUSERS_1_PERMISSIONS_0_ACTION: "api"
